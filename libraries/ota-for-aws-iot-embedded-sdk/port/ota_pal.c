@@ -43,6 +43,7 @@
 #include "mbedtls/bignum.h"
 #include "mbedtls/base64.h"
 #include "freertos/task.h"
+#include "AWS_IoT.h"
 
 #define OTA_HALF_SECOND_DELAY    pdMS_TO_TICKS( 500UL )
 #define ECDSA_INTEGER_LEN        32
@@ -77,6 +78,19 @@ typedef struct
 } esp_sec_boot_sig_t;
 
 static esp_ota_context_t ota_ctx;
+
+ota_storage_interface_t ota_storage_interface = {.start_sector = 0,
+                                                 .end_sector = 0,
+                                                 .size = 0,
+                                                 .curr_addr = 0,
+                                                 .ext_flash_write_ota = NULL,
+                                                 .ext_flash_overwrite_ota_sector = NULL,
+                                                 .ota_write_internal_partition = NULL,
+                                                 .ext_flash_read_complete_ota_storage = NULL,
+                                                 .start_slave_ota = NULL};
+
+uint8_t ota_signature[CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION];
+
 static const char * TAG = "ota_pal";
 
 static const char codeSigningCertificatePEM[] = otapalconfigCODE_SIGNING_CERTIFICATE;
@@ -199,6 +213,10 @@ OtaPalStatus_t otaPal_CreateFileForRx( OtaFileContext_t * const pFileContext )
     }
 
     const esp_partition_t * update_partition = esp_ota_get_next_update_partition( NULL );
+    printf("------------------- Next OTA app partition info which should be written with a new firmware -----------------\n");
+    printf("label : %s\n", update_partition->label);
+    printf("address : %d\n", update_partition->address);
+    printf("size : %d\n", update_partition->size);
 
     if( update_partition == NULL )
     {
@@ -343,6 +361,7 @@ static CK_RV prvGetCertificate( const char * pcLabelName,
     }
     else /* Certificate was not found. */
     {
+        printf("Certificate was not found.\n");
         *ppucData = NULL;
         *pulDataSize = 0;
     }
@@ -371,8 +390,9 @@ uint8_t * otaPal_ReadAndAssumeCertificate( const uint8_t * const pucCertName,
     }
     else
     {
-        LogInfo( ( "No such certificate file: %s. Using certificate in ota_config.h.",
-                   ( const char * ) pucCertName ) );
+
+        LogInfo(("No such certificate file: %s. Using certificate in ota_config.h.",
+                 (const char *)pucCertName));
 
         /* Allocate memory for the signer certificate plus a terminating zero so we can copy it and return to the caller. */
         ulCertSize = sizeof( codeSigningCertificatePEM );
@@ -401,7 +421,7 @@ OtaPalStatus_t otaPal_CheckFileSignature( OtaFileContext_t * const pFileContext 
     void * pvSigVerifyContext;
     uint8_t * pucSignerCert = 0;
     static spi_flash_mmap_memory_t ota_data_map;
-    uint32_t mmu_free_pages_count, len, flash_offset = 0;
+    uint32_t chunk = 0;
 
     /* Verify an ECDSA-SHA256 signature. */
     if( CRYPTO_SignatureVerificationStart( &pvSigVerifyContext, cryptoASYMMETRIC_ALGORITHM_ECDSA,
@@ -418,33 +438,39 @@ OtaPalStatus_t otaPal_CheckFileSignature( OtaFileContext_t * const pFileContext 
         LogError( ( "Cert read failed" ) );
         return OTA_PAL_COMBINE_ERR( OtaPalBadSignerCert, 0 );
     }
-
-    mmu_free_pages_count = spi_flash_mmap_get_free_pages( SPI_FLASH_MMAP_DATA );
-    len = ota_ctx.data_write_len;
-
-    while( len > 0 )
+    else
     {
-        /* Data we could map in case we are not aligned to PAGE boundary is one page size lesser.
-         * 0x0000FFFF is mmap aligned mask for 64K boundary */
-        uint32_t mmu_page_offset = ( ( flash_offset & 0x0000FFFF ) != 0 ) ? 1 : 0;
-        /* Read the image that fits in the free MMU pages */
-        uint32_t partial_image_len = MIN( len, ( ( mmu_free_pages_count - mmu_page_offset ) * SPI_FLASH_MMU_PAGE_SIZE ) );
-        const void * buf = NULL;
+        printf("========= certificate read success ==========");
+    }
 
-        esp_err_t ret = esp_partition_mmap( ota_ctx.update_partition, flash_offset, partial_image_len,
-                                            SPI_FLASH_MMAP_DATA, &buf, &ota_data_map );
+    vTaskDelay(pdMS_TO_TICKS(4000));
 
-        if( ret != ESP_OK )
+    for (chunk = 0; chunk < (ota_ctx.data_write_len - (ota_ctx.data_write_len % CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION)); chunk = chunk + CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION)
+    {
+        if (ota_storage_interface.ext_flash_read_complete_ota_storage == NULL)
         {
-            LogError( ( "Partition mmap failed %d", ret ) );
-            result = OTA_PAL_COMBINE_ERR( OtaPalSignatureCheckFailed, 0 );
-            goto end;
+            return OTA_PAL_COMBINE_ERR( OtaPalSignatureCheckFailed, 0 );
         }
-
-        CRYPTO_SignatureVerificationUpdate( pvSigVerifyContext, buf, partial_image_len );
-        spi_flash_munmap( ota_data_map );
-        flash_offset += partial_image_len;
-        len -= partial_image_len;
+        else
+        {
+            ota_storage_interface.ext_flash_read_complete_ota_storage(ota_signature, CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION, chunk);
+        }
+        CRYPTO_SignatureVerificationUpdate(pvSigVerifyContext, ota_signature, CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION);
+    }
+    
+    if ((ota_ctx.data_write_len % CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION) != 0)
+    {
+        if (ota_storage_interface.ext_flash_read_complete_ota_storage == NULL)
+        {
+            return OTA_PAL_COMBINE_ERR(OtaPalSignatureCheckFailed, 0);
+        }
+        else
+        {
+            ota_storage_interface.ext_flash_read_complete_ota_storage(ota_signature,
+                                                                      (ota_ctx.data_write_len % CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION),
+                                                                      chunk);
+        }
+        CRYPTO_SignatureVerificationUpdate(pvSigVerifyContext, ota_signature, (ota_ctx.data_write_len % CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION));
     }
 
     if( CRYPTO_SignatureVerificationFinal( pvSigVerifyContext, ( char * ) pucSignerCert, ulSignerCertSize,
@@ -455,10 +481,11 @@ OtaPalStatus_t otaPal_CheckFileSignature( OtaFileContext_t * const pFileContext 
     }
     else
     {
-        result = OTA_PAL_COMBINE_ERR( OtaPalSuccess, 0 );
+        printf("***********************************************");
+        ESP_LOGI(TAG,"\t\t\t\t\tSignature Verified!");
+        printf("***********************************************");
+        result = OTA_PAL_COMBINE_ERR(OtaPalSuccess, 0);
     }
-
-end:
 
     /* Free the signer certificate that we now own after prvReadAndAssumeCertificate(). */
     if( pucSignerCert != NULL )
@@ -473,6 +500,7 @@ end:
 OtaPalStatus_t otaPal_CloseFile( OtaFileContext_t * const pFileContext )
 {
     OtaPalMainStatus_t mainErr = OtaPalSuccess;
+    esp_err_t ret = ESP_FAIL;
 
     if( !_esp_ota_ctx_validate( pFileContext ) )
     {
@@ -485,7 +513,7 @@ OtaPalStatus_t otaPal_CloseFile( OtaFileContext_t * const pFileContext )
         _esp_ota_ctx_clear( &ota_ctx );
         mainErr = OtaPalSignatureCheckFailed;
     }
-    else if( ota_ctx.data_write_len == 0 )
+    else if( ota_storage_interface.curr_addr == ota_storage_interface.start_sector )
     {
         LogError( ( "No data written to partition" ) );
         mainErr = OtaPalSignatureCheckFailed;
@@ -494,10 +522,9 @@ OtaPalStatus_t otaPal_CloseFile( OtaFileContext_t * const pFileContext )
     {
         /* Verify the file signature, close the file and return the signature verification result. */
         mainErr = OTA_PAL_MAIN_ERR( otaPal_CheckFileSignature( pFileContext ) );
-
         if( mainErr != OtaPalSuccess )
         {
-            esp_partition_erase_range( ota_ctx.update_partition, 0, ota_ctx.update_partition->size );
+            ESP_LOGE(TAG,"OTA Signature failed");
         }
         else
         {
@@ -512,13 +539,20 @@ OtaPalStatus_t otaPal_CloseFile( OtaFileContext_t * const pFileContext )
 
                 if( mainErr == OtaPalSuccess )
                 {
-                    esp_err_t ret = esp_ota_write_with_offset( ota_ctx.update_handle, sec_boot_sig, ECDSA_SIG_SIZE, ota_ctx.data_write_len );
+                    printf("<================== Writing OTA signature data to final partition ========================>\n");
+                    if (ota_storage_interface.ext_flash_overwrite_ota_sector == NULL)
+                    {
+                        ret = ESP_ERR_INVALID_ARG;
+                    }
+                    else
+                    {
+                        ret = ota_storage_interface.ext_flash_overwrite_ota_sector((uint8_t *)sec_boot_sig, ECDSA_SIG_SIZE);
+                    }
 
                     if( ret != ESP_OK )
                     {
                         return OTA_PAL_COMBINE_ERR( OtaPalFileClose, 0 );
                     }
-
                     ota_ctx.data_write_len += ECDSA_SIG_SIZE;
                 }
 
@@ -531,7 +565,6 @@ OtaPalStatus_t otaPal_CloseFile( OtaFileContext_t * const pFileContext )
             }
         }
     }
-
     return OTA_PAL_COMBINE_ERR( mainErr, 0 );
 }
 
@@ -547,29 +580,42 @@ OtaPalStatus_t IRAM_ATTR otaPal_ResetDevice( OtaFileContext_t * const pFileConte
 
 OtaPalStatus_t otaPal_ActivateNewImage( OtaFileContext_t * const pFileContext )
 {
-    ( void ) pFileContext;
+    esp_err_t err = ESP_FAIL;
+    AWS_IoT_return_t return_code;
 
-    if( ota_ctx.cur_ota != NULL )
-    {
-        if( esp_ota_end( ota_ctx.update_handle ) != ESP_OK )
+    if( ota_ctx.cur_ota != NULL && ota_storage_interface.start_slave_ota != NULL )
+    {        
+        return_code = ota_storage_interface.start_slave_ota();
+
+        if (!AWS_IoT_ERROR_BIT(return_code, AWS_OTA_STORAGE_INIT_FAILED))
         {
-            LogError( ( "esp_ota_end failed!" ) );
-            esp_partition_erase_range( ota_ctx.update_partition, 0, ota_ctx.update_partition->size );
-            otaPal_ResetDevice( pFileContext );
-        }
+            printf("<=========== OTA Boot partition is setting ============>\n");
 
-        esp_err_t err = esp_ota_set_boot_partition( ota_ctx.update_partition );
+            err = ota_storage_interface.ota_write_internal_partition(ota_ctx.update_partition, ota_ctx.update_handle);
 
-        if( err != ESP_OK )
-        {
-            LogError( ( "esp_ota_set_boot_partition failed (%d)!", err ) );
-            esp_partition_erase_range( ota_ctx.update_partition, 0, ota_ctx.update_partition->size );
-            _esp_ota_ctx_clear( &ota_ctx );
-        }
+            if (err == ESP_OK)
+            {
+                if (esp_ota_end(ota_ctx.update_handle) != ESP_OK)
+                {
+                    LogError(("esp_ota_end failed!"));
+                    otaPal_ResetDevice(pFileContext);
+                }
 
-        otaPal_ResetDevice( pFileContext );
+                err = esp_ota_set_boot_partition(ota_ctx.update_partition);
+                if (err != ESP_OK)
+                {
+                    LogError(("esp_ota_set_boot_partition failed (%d)!", err));
+                    esp_partition_erase_range(ota_ctx.update_partition, 0, ota_ctx.update_partition->size);
+                    _esp_ota_ctx_clear(&ota_ctx);
+                }
+                otaPal_ResetDevice(pFileContext);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed to write ota data from external flash to ota partition");
+            }
+        }   
     }
-
     _esp_ota_ctx_clear( &ota_ctx );
     otaPal_ResetDevice( pFileContext );
     return OTA_PAL_COMBINE_ERR( OtaPalSuccess, 0 );
@@ -581,16 +627,29 @@ int16_t otaPal_WriteBlock( OtaFileContext_t * const pFileContext,
                            uint8_t * const pacData,
                            uint32_t iBlockSize )
 {
-    if( _esp_ota_ctx_validate( pFileContext ) )
+    esp_err_t ret = ESP_FAIL;
+    uint32_t ulSignerCertSize;
+    uint8_t * pucSignerCert = 0;
+    if (_esp_ota_ctx_validate(pFileContext))
     {
-        esp_err_t ret = esp_ota_write_with_offset( ota_ctx.update_handle, pacData, iBlockSize, iOffset );
+        if(ota_storage_interface.ext_flash_write_ota==NULL)
+        {
+            ret = ESP_ERR_INVALID_ARG;
+        }
+        else
+        {
+            ret = ota_storage_interface.ext_flash_write_ota(pacData, iBlockSize);
+        }
 
         if( ret != ESP_OK )
         {
             LogError( ( "Couldn't flash at the offset %d", iOffset ) );
             return -1;
         }
-
+        else
+        {
+            // do nothing
+        }
         ota_ctx.data_write_len += iBlockSize;
     }
     else
@@ -598,7 +657,6 @@ int16_t otaPal_WriteBlock( OtaFileContext_t * const pFileContext,
         LogInfo( ( "Invalid OTA Context" ) );
         return -1;
     }
-
     return iBlockSize;
 }
 

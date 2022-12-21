@@ -34,6 +34,10 @@
 #include "ota.h"
 #include "esp_err.h"
 
+#define CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION 4096
+
+extern ota_storage_interface_t ota_storage_interface;
+
 /**
  * @brief Abort an OTA transfer.
  *

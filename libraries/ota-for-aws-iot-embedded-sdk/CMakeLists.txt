@@ -35,6 +35,7 @@ set(AWS_OTA_REQUIRES
     efuse
     log
     app_update
+    IoT_Core
 )
 
 idf_component_register(

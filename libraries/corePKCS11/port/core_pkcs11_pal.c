@@ -262,7 +262,8 @@ CK_OBJECT_HANDLE PKCS11_PAL_FindObject( CK_BYTE_PTR pxLabel,
         }
 
         size_t required_size = 0;
-        err = nvs_get_blob(handle, pcFileName, NULL, &required_size);
+        err = nvs_get_str(handle, pcFileName, NULL, &required_size);
+        err = nvs_get_str(handle, pcFileName, NULL, &required_size);
         if (err != ESP_OK || required_size == 0) {
             ESP_LOGE(TAG, "failed nvs get file size %d %d", err, required_size);
             xHandle = eInvalidHandle;
@@ -363,7 +364,8 @@ CK_RV PKCS11_PAL_GetObjectValue( CK_OBJECT_HANDLE xHandle,
         }
 
         size_t required_size = 0;
-        err = nvs_get_blob(handle, pcFileName, NULL, &required_size);
+        err = nvs_get_str(handle, pcFileName, NULL, &required_size);
+        err = nvs_get_str(handle, pcFileName, NULL, &required_size);
         if (err != ESP_OK || required_size == 0) {
             ESP_LOGE(TAG, "failed nvs get file size %d %d", err, required_size);
             ulReturn = CKR_OBJECT_HANDLE_INVALID;
@@ -378,7 +380,7 @@ CK_RV PKCS11_PAL_GetObjectValue( CK_OBJECT_HANDLE xHandle,
         }
         *ppucData = data;
 
-        err = nvs_get_blob(handle, pcFileName, data, &required_size);
+        err = nvs_get_str(handle, pcFileName, (char*)data, &required_size);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "failed nvs get file %d", err);
             vPortFree(data);
