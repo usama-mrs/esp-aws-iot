@@ -33,6 +33,7 @@
 
 #include "ota.h"
 #include "esp_err.h"
+#include "AWS_IoT.h"
 
 #define CHUNK_SIZE_FOR_SIGNATURE_VERIFICATION 4096
 
