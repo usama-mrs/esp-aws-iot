@@ -1,5 +1,5 @@
 # This gives OTA_INCLUDE_PUBLIC_DIRS, and OTA_SOURCES
-include(${CMAKE_CURRENT_LIST_DIR}/ota-for-aws-iot-embedded-sdk/otaFilePaths.cmake)
+include(/${CMAKE_CURRENT_LIST_DIR}/ota-for-aws-iot-embedded-sdk/otaFilePaths.cmake)
 
 set(AWS_OTA_PORT_INCLUDE_DIRS
     ${CMAKE_CURRENT_LIST_DIR}/port
